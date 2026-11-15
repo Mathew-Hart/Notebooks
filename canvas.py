@@ -18,6 +18,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QEventPoint,
     QFont,
     QFontMetrics,
     QImage,
@@ -27,6 +28,7 @@ from PySide6.QtGui import (
     QPainterPathStroker,
     QPen,
     QPixmap,
+    QPointingDevice,
     QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
@@ -614,6 +616,10 @@ class PageCanvas(QGraphicsView):
         self.pen_color = QColor(_INK)
         self.pen_width = _INK_WIDTH
         self._stroke = None
+        self._tablet_active = False
+        self._lasso = None
+        self._touch_anchor = None
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self._erase_previous = None
         self._pressed_link = None
         self._pressed_checkbox = None
@@ -645,6 +651,9 @@ class PageCanvas(QGraphicsView):
         try:
             self._finish_text()
             self._stroke = None
+            self._tablet_active = False
+            self._lasso = None
+            self._touch_anchor = None
             self._erase_previous = None
             self._pressed_link = None
             self._pressed_checkbox = None
@@ -1004,14 +1013,131 @@ class PageCanvas(QGraphicsView):
         self.setFocus()
 
     def viewportEvent(self, event):
+        if event.type() in {
+            QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+            QEvent.Type.TouchEnd, QEvent.Type.TouchCancel,
+        }:
+            self._pan_touch(event)
+            event.accept()
+            return True
+        if event.type() in {
+            QEvent.Type.TabletPress, QEvent.Type.TabletMove, QEvent.Type.TabletRelease,
+        }:
+            self._write_tablet(event)
+            # Accept native pen events so Qt does not also synthesize mouse input.
+            event.accept()
+            return True
         if event.type() == QEvent.Type.UngrabMouse and hasattr(self, "_stroke"):
             self._gesture_finished()
+            self._tablet_active = False
             self._pressed_link = None
             self._pressed_checkbox = None
             self._text_click = None
             self._undo_gesture = False
             self._record_undo()
         return super().viewportEvent(event)
+
+    def _pan_touch(self, event):
+        if event.type() in {QEvent.Type.TouchEnd, QEvent.Type.TouchCancel}:
+            self._touch_anchor = None
+            return
+        if self._tablet_active or self._undo_gesture:
+            self._touch_anchor = None
+            return
+        points = [p for p in event.points() if p.state() != QEventPoint.State.Released]
+        if not points:
+            self._touch_anchor = None
+            return
+        # Follow one finger; switching fingers establishes a new anchor without jumping.
+        previous = self._touch_anchor
+        point = next((p for p in points if previous and p.id() == previous[0]), points[0])
+        position = point.position()
+        if previous is not None and previous[0] == point.id():
+            delta = position - previous[1]
+            horizontal = self.horizontalScrollBar()
+            vertical = self.verticalScrollBar()
+            horizontal.setValue(horizontal.value() - round(delta.x()))
+            vertical.setValue(vertical.value() - round(delta.y()))
+        self._touch_anchor = (point.id(), QPointF(position))
+
+    def _write_tablet(self, event):
+        point = self.mapToScene(event.position().toPoint())
+        side_buttons = Qt.MouseButton.RightButton | Qt.MouseButton.MiddleButton
+        side_held = bool(event.buttons() & side_buttons)
+        eraser = event.pointerType() == QPointingDevice.PointerType.Eraser
+        if self._lasso is not None:
+            self._lasso.lineTo(point)
+            self.viewport().update()
+            if not side_held or (
+                event.type() == QEvent.Type.TabletRelease
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                area = QPainterPath(self._lasso)
+                area.closeSubpath()
+                self.scene().setSelectionArea(
+                    area, Qt.ItemSelectionOperation.ReplaceSelection,
+                    Qt.ItemSelectionMode.IntersectsItemShape, self.viewportTransform(),
+                )
+                self._gesture_finished()
+                self._tablet_active = False
+                self._undo_gesture = False
+                self._record_undo()
+            return
+        if side_held and not eraser and event.type() == QEvent.Type.TabletPress:
+            if self._undo_gesture and not self._tablet_active:
+                return
+            # A barrel-button press can arrive during a stroke or while hovering.
+            self._gesture_finished()
+            self._undo_gesture = False
+            self._record_undo()
+            self._finish_text()
+            self.scene().clearSelection()
+            self._touch_anchor = None
+            self._tablet_active = True
+            self._undo_gesture = True
+            self._lasso = QPainterPath(point)
+            self.viewport().update()
+            return
+        if event.type() == QEvent.Type.TabletPress:
+            if self._undo_gesture:
+                return
+            self._finish_text()
+            self.scene().clearSelection()
+            self._touch_anchor = None
+            self._tablet_active = True
+            self._undo_gesture = True
+            if self._tool == "erase" or event.pointerType() == QPointingDevice.PointerType.Eraser:
+                self._erase(point)
+            else:
+                self._start_stroke(point)
+        elif self._tablet_active:
+            if self._stroke is not None:
+                self._stroke.add_point(point - self._stroke.pos())
+            elif self._erase_previous is not None:
+                self._erase(point)
+            if event.type() == QEvent.Type.TabletRelease:
+                self._gesture_finished()
+                self._tablet_active = False
+                self._undo_gesture = False
+                self._record_undo()
+
+    def drawForeground(self, painter, rectangle):
+        super().drawForeground(painter, rectangle)
+        if self._lasso is not None:
+            painter.save()
+            pen = QPen(_SELECTION, 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(self._lasso)
+            painter.restore()
+
+    def _start_stroke(self, point):
+        self._stroke = self._add_item({
+            "type": "ink", "x": point.x(), "y": point.y(),
+            "points": [[0, 0]], "width": self.pen_width,
+            "color": self.pen_color.name(QColor.NameFormat.HexArgb),
+        })
 
     def add_text(self, position=None, html=""):
         self.set_tool("select")
@@ -1431,12 +1557,7 @@ class PageCanvas(QGraphicsView):
         if self._tool == "text":
             self.add_text(point)
         elif self._tool == "ink":
-            self._stroke = self._add_item({
-                "type": "ink", "x": point.x(), "y": point.y(),
-                "points": [[0, 0]],
-                "width": self.pen_width,
-                "color": self.pen_color.name(QColor.NameFormat.HexArgb),
-            })
+            self._start_stroke(point)
         elif self._tool == "erase":
             self._erase(point)
         else:
@@ -1514,6 +1635,11 @@ class PageCanvas(QGraphicsView):
             self._record_undo()
 
     def _gesture_finished(self):
+        if self._lasso is not None:
+            self._lasso = None
+            self._tablet_active = False
+            self._undo_gesture = False
+            self.viewport().update()
         if self._stroke is not None:
             self._stroke = None
             self._content_changed()
@@ -1601,6 +1727,10 @@ class PageCanvas(QGraphicsView):
         self._content_changed()
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self._lasso is not None:
+            self._gesture_finished()
+            event.accept()
+            return
         if event.matches(QKeySequence.StandardKey.Undo):
             self.undo()
             event.accept()
