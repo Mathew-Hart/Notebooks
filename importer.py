@@ -2,6 +2,7 @@
 
 import base64
 from collections import Counter
+from datetime import datetime, timezone
 import math
 import os
 from pathlib import Path, PureWindowsPath
@@ -40,6 +41,15 @@ RICH_STYLES = {
     "vertical-align", "width",
 }
 EQUATION = re.compile(r"\\\((.*?)\\\)|\\\[(.*?)\\\]", re.DOTALL)
+_PAGE_DATE = re.compile(
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), "
+    r"(?:January|February|March|April|May|June|July|August|September|October|November|December) "
+    r"(?:0?[1-9]|[12][0-9]|3[01]), [0-9]{4}",
+    re.IGNORECASE,
+)
+_PAGE_TIME = re.compile(r"(?:0?[1-9]|1[0-2]):[0-5][0-9] [AP]M", re.IGNORECASE)
+IMPORTED_PAGE_HEADER = "imported_page_header"
+_OUTLINE_FONT = "font-family: Calibri, Carlito, sans-serif; font-size: 6pt;"
 
 
 def _resolve_converter(explicit):
@@ -256,7 +266,7 @@ def _outline(tag, page, root, warnings, x, y, width):
 
     ordered = [elements[int(img.attrs.pop("data-index"))] for img in wrapper.find_all("img")]
     _sanitize_rich_text(wrapper)
-    wrapper.attrs = {"style": "font-family: Calibri, Carlito, sans-serif; font-size: 6pt;"}
+    wrapper.attrs = {"style": _OUTLINE_FONT}
     markup = str(wrapper)
 
     doc = QTextDocument()
@@ -282,6 +292,67 @@ def _outline(tag, page, root, warnings, x, y, width):
     return objects, height
 
 
+def _title_outline_text(obj):
+    html = obj.get("html")
+    if not isinstance(html, str):
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    if soup.find(["a", "img", "ol", "table", "ul"]):
+        return []
+    return [" ".join(value.split()) for value in soup.stripped_strings]
+
+
+def _has_converter_title_structure(obj):
+    # This grouping is created by the converter's title and timestamp outlines.
+    # It permits recognizing a renamed page when the original markup survives.
+    wrapper = BeautifulSoup(obj["html"], "html.parser").find(True)
+    if wrapper is None or wrapper.name != "div" or wrapper.get("style") != _OUTLINE_FONT:
+        return False
+    groups = wrapper.find_all("div", recursive=False)
+    return [len(group.find_all("div", recursive=False)) for group in groups] == [1, 2]
+
+
+def _title_outline_date(lines):
+    if len(lines) == 3 and _PAGE_DATE.fullmatch(lines[1]) and _PAGE_TIME.fullmatch(lines[2]):
+        return f"{lines[1]} at {lines[2]}"
+    return None
+
+
+def _title_matches(lines, title):
+    return bool(lines) and lines[0].casefold() == " ".join(title.split()).casefold()
+
+
+def split_imported_header(objects, title):
+    """Find a source title outline and its display date without changing stored objects."""
+    if not objects or objects[0].get("type") != "text":
+        return None, None
+    header = objects[0]
+    if header.get(IMPORTED_PAGE_HEADER) is True:
+        return header, _title_outline_date(_title_outline_text(header))
+    # Older imports discarded the converter's title class. Require its default
+    # placement and exact title/date/time structure before hiding the outline.
+    if header.get("x") == 48 and header.get("y") == 24:
+        lines = _title_outline_text(header)
+        date = _title_outline_date(lines)
+        if date and (_title_matches(lines, title) or (
+            header.get("w") == 460 and _has_converter_title_structure(header)
+        )):
+            return header, date
+    return None, None
+
+
+def _modified_at(soup):
+    timestamp = soup.find("meta", attrs={"name": "X-Updated-Time"})
+    if timestamp is not None:
+        try:
+            seconds = int(timestamp["content"])
+            if seconds:  # The converter uses Unix epoch for an invalid timestamp.
+                return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            pass
+    return None
+
+
 def _page(path, title, root, warnings):
     soup = _soup(path)
     if not soup.find("meta", attrs={"name": "X-Original-Page-Id"}) or not soup.body:
@@ -303,11 +374,19 @@ def _page(path, title, root, warnings):
         elif tag.name == "div":
             width = _number(styles.get("width") or styles.get("max-width"), 460.0)
             layer, height = _outline(tag, path, root, warnings, x, y, max(100.0, width))
+            if not objects and "title" in tag.get("class", []) and len(layer) == 1 and layer[0]["type"] == "text":
+                lines = _title_outline_text(layer[0])
+                if _title_matches(lines, title) and (len(lines) == 1 or _title_outline_date(lines)):
+                    layer[0][IMPORTED_PAGE_HEADER] = True
             objects.extend(layer)
             next_y = max(next_y, y + height)
         elif tag.name in {"embed", "audio", "video"}:
             warnings["embedded files or media skipped"] += 1
-    return {"title": title, "objects": objects}
+    result = {"title": title, "objects": objects}
+    modified_at = _modified_at(soup)
+    if modified_at is not None:
+        result["modified_at"] = modified_at
+    return result
 
 
 def _package_sections(source):

@@ -25,11 +25,17 @@ You can also import during launch:
 python app.py --import-notebook '/path/to/Example.onepkg'
 ```
 
-The converter runs locally. The app reads its temporary output into native objects and stores those in the local database. Select a notebook on the left, a section tab across the top, and a page from the list on the right. Use **File → New Page** to add a page to the current section. Double-click a text frame or equation to edit it. Use **Select** to move objects, **Pen** to draw, **Eraser** to remove ink, and **Paste Image** to insert a screenshot from the clipboard. A title or body term can find a page through the sidebar search. For an isolated test library, pass `--database /path/to/sandbox.sqlite3`.
+The converter runs locally. The app reads its temporary output into native objects and stores those in the local database. Select a notebook on the left, a section tab across the top, and a page from the list on the right. Use **File → New Notebook** to create a notebook or **Add Page** to add a page to the current section. Drag section tabs or pages to reorder them. Right-click a tab or page to rename, delete, cut, copy, or paste. Clear the search to drag items. Double-click a text frame or equation to edit it. Use **Select** to move objects, **Pen** to draw, **Eraser** to remove ink, and **Paste Image** to insert a screenshot from the clipboard. A title or body term can find a page through the sidebar search. For an isolated test library, pass `--database /path/to/sandbox.sqlite3`.
+
+Use **File → Page Setup** to choose the paper size, orientation, and margins for preview, printing, and PDF export. These settings are saved with the local library. Use **File → Print Preview** to review the current note one sheet at a time. Preview requires Qt PDF or the Poppler utilities (`pdfinfo` and `pdftoppm`).
+
+Use **File → Print** to send the current note to a system printer, or **File → Print to PDF** to save a PDF without a printer. Both include the page background and content outside the visible canvas. Long notes continue across multiple sheets.
+
+Use **Insert → Camera** to preview a connected camera and capture a photo directly into the current note. For Debian-based systems using the distribution's PySide6, install `python3-pyside6.qtmultimedia` and `python3-pyside6.qtmultimediawidgets`. macOS app bundles need a camera usage description in [Info.plist](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QCameraPermission.html).
 
 ## Optional sync
 
-Choose one host for a library. The DS223 can run the Python service in an ARM64 Python container using Synology Container Manager. Mount a folder **on the NAS volume** at `/data` and the project at `/app`, set the container working directory to `/app`, and publish port 8765 to the private LAN. The service uses the standard library and needs only `sync.py`. For a Linux server, point `--data-dir` at storage local to that server.
+Choose one host for a library. To run the Python service in a container on a NAS, mount a folder **on the NAS volume** at `/data` and the project at `/app`, set the container working directory to `/app`, and publish port 8765 to the private LAN. The service uses the standard library and needs only `sync.py`. For a Linux server, point `--data-dir` at storage local to that server.
 
 Set `NOTES_SYNC_TOKEN` to the same long random value on the host and both clients. Use the NAS or server's address for `NOTES_SYNC_URL`.
 
@@ -41,7 +47,7 @@ python3 sync.py --data-dir /data --bind 0.0.0.0 --port 8765
 NOTES_SYNC_URL=http://nas.example.test:8765 python app.py
 ```
 
-The prototype's HTTP mode is for a trusted private network. Use HTTPS through a reverse proxy if the network requires encrypted transport. Import the notebook on one client and let the other receive it through sync. The app syncs periodically and on **File → Sync Now**. Concurrent edits to the same page preserve the device's version as a separate conflict copy. Keep a separate local database for each device.
+The prototype's HTTP mode is for a trusted private network. Use HTTPS through a reverse proxy if the network requires encrypted transport. Import the notebook on one client and let the other receive it through sync. The app syncs periodically and on **File → Sync**. Concurrent edits to the same page preserve the device's version as a separate conflict copy. Keep a separate local database for each device.
 
 ## Prototype scope
 
